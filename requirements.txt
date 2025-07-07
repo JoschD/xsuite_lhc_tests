@@ -1,0 +1,7 @@
+numpy
+pandas
+tfs-pandas
+cpymad
+cpymad_lhc
+xsuite
+omc3
