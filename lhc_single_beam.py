@@ -88,7 +88,14 @@ def create_line(beam: LHCBeam):
     return line
 
 
-def nominal(beam: LHCBeam, line: str | None):
+def nominal(beam: LHCBeam, line: xt.Line | None):
+    """ Continue the LHC setup to the nominal machine, i.e.
+    match the tunes and write out the twiss table.
+
+    Args:
+        beam (LHCBeam): beam object storing machine configuration data
+        line (xt.Line): line of the loaded machine, if not given loads from json.
+    """
     LOGGER.info("Creating nominal twiss table")
 
     if line is None:
@@ -102,8 +109,6 @@ def nominal(beam: LHCBeam, line: str | None):
     tfs.write(beam.output_path("twiss", Step.nominal), df, save_index="NAME")
 
     line.to_json(beam.output_path("line", Step.nominal, suffix=".json"))
-
-    return line
 
 
 def main():
