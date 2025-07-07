@@ -15,7 +15,8 @@ from cpymad.madx import Madx
 from lhc_beam import LHCBeam
 from utils.logging import disable_logging, init_cpymad_logging, init_logging
 from utils.tfs import twiss_to_omc3
-from utils.xsuite import match
+from utils.xsuite import match, insert_monitors_at_pattern
+import turn_by_turn as tbt
 
 
 MADX_LOGGING: bool = False
@@ -83,12 +84,12 @@ def create_line(beam: LHCBeam):
 
     line.twiss_default["method"] = "4d"
     line.particle_ref = xt.Particles(p0c=beam.energy*1e9, q0=1, mass0=xp.PROTON_MASS_EV)
-    line.to_json(beam.output_path("line", Step.raw, suffix=".json"))
+    line.to_json(beam.get_line_path(Step.raw))
     madx.exit()
     return line
 
 
-def nominal(beam: LHCBeam, line: xt.Line | None):
+def nominal(beam: LHCBeam, line: xt.Line | None = None):
     """ Continue the LHC setup to the nominal machine, i.e.
     match the tunes and write out the twiss table.
 
@@ -100,15 +101,32 @@ def nominal(beam: LHCBeam, line: xt.Line | None):
 
     if line is None:
         LOGGER.debug("Loading from file.")
-        line = xt.Line.from_json(beam.output_path("line", Step.raw, suffix=".json"))
+        line = xt.Line.from_json(beam.get_line_path(Step.raw))
 
     match(beam, line)
 
     tw: xt.TwissTable = line.twiss(continue_on_closed_orbit_error=False, strengths=True)
     df = twiss_to_omc3(tw)
-    tfs.write(beam.output_path("twiss", Step.nominal), df, save_index="NAME")
+    tfs.write(beam.get_twiss_path(Step.nominal), df, save_index="NAME")
 
-    line.to_json(beam.output_path("line", Step.nominal, suffix=".json"))
+    line.to_json(beam.get_line_path(Step.nominal))
+
+
+def track(beam: LHCBeam, line: xt.Line | None = None, n_turns: int = 10) -> tbt.TbtData:
+    if line is None:
+        LOGGER.debug("Loading from file.")
+        line = xt.Line.from_json(beam.get_line_path(Step.nominal))
+
+    insert_monitors_at_pattern(line, n_turns=n_turns)
+    line.track(line.particle_ref, num_turns=n_turns)
+    tbt_data = tbt.xtrack_line.convert_to_tbt(line)
+
+    for bunch_id in tbt_data.bunch_ids:
+        for plane in "XY":
+            tbt_data.matrices[bunch_id][plane].index = tbt_data.matrices[bunch_id][plane].index.str.replace("_monitor", "").str.upper()
+
+    # tbt.write(beam.model_dir / "track.sdds", tbt_data, datatype="lhc")
+    return tbt_data
 
 
 def main():
@@ -116,12 +134,15 @@ def main():
         beam=1,
         year="2025",
         modifiers=["R2025aRP_A18cmC18cmA10mL200cm_Flat.madx"],
-        model_dir=Path("./test_nolog"),
+        model_dir=Path("./test_out"),
     )
 
-    line = create_line(beam)
-    nominal(beam, line)
+    # line = create_line(beam)
+    # nominal(beam, line)
+    # track(beam, line)
+
     # nominal(beam)
+    tbt = track(beam)
 
 
 

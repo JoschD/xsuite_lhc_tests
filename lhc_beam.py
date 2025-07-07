@@ -128,6 +128,12 @@ class LHCBeam(LHC):
             dir_ = self.model_dir
         return dir_ / f'{type_}.lhc.b{self.beam:d}.{output_id}{suffix}'
 
+    def get_twiss_path(self, output_id: str):
+        return self.output_path("twiss", output_id)
+
+    def get_line_path(self, output_id: str):
+        return self.output_path("line", output_id, suffix=".json")
+
     @property
     def cycling_element(self):
         """ First element after injection for each beam. """
