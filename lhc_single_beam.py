@@ -121,10 +121,6 @@ def track(beam: LHCBeam, line: xt.Line | None = None, n_turns: int = 10) -> tbt.
     line.track(line.particle_ref, num_turns=n_turns)
     tbt_data = tbt.xtrack_line.convert_to_tbt(line)
 
-    for bunch_id in tbt_data.bunch_ids:
-        for plane in "XY":
-            tbt_data.matrices[bunch_id][plane].index = tbt_data.matrices[bunch_id][plane].index.str.replace("_monitor", "").str.upper()
-
     # tbt.write(beam.model_dir / "track.sdds", tbt_data, datatype="lhc")
     return tbt_data
 

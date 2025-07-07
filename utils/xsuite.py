@@ -47,13 +47,13 @@ def insert_monitors_at_pattern(line: xt.Line, pattern: str = "BPM", n_turns: int
     Each monitor will record for the specified number of turns and particles.
     """
     # Find all element names matching the pattern (e.g., all BPMs)
-    selected_list = [name for name in line.element_names if re.match(pattern, name, flags=re.IGNORECASE)]
+    selected_list: list[str] = [name for name in line.element_names if re.match(pattern, name, flags=re.IGNORECASE)]
 
     if not selected_list:
         raise ValueError(f"No elements match the pattern '{pattern}'")
 
     # Get the s-positions of these elements
-    s_positions = line.get_s_position(selected_list)
+    s_positions: list[float] = line.get_s_position(selected_list)
 
     # Prepare a base monitor object to copy for each BPM
     monitor_base = xt.ParticlesMonitor(
@@ -65,8 +65,7 @@ def insert_monitors_at_pattern(line: xt.Line, pattern: str = "BPM", n_turns: int
     # Register a monitor element for each BPM, and collect placement instructions
     inserts: list[xt.Place] = []
     for name, s in zip(selected_list, s_positions):
-        monitor_name = f"{name}_monitor"
-
+        monitor_name = name.upper()
         monitor = monitor_base.copy()
 
         line.env.elements[monitor_name] = monitor
