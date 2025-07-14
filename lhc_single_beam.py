@@ -32,6 +32,7 @@ class Step(StrEnum):
     """ Enum for the different steps of the simulation """
     raw = auto()
     nominal = auto()
+    with_errors = auto()
 
 
 def load_sequence_and_optics(beam: LHCBeam) -> Madx:
@@ -108,14 +109,66 @@ def nominal(beam: LHCBeam, line: xt.Line | None = None):
 
     match(beam, line)
 
-    tw: xt.TwissTable = line.twiss(continue_on_closed_orbit_error=False, strengths=True)
-    df = twiss_to_omc3(tw)
-    tfs.write(beam.get_twiss_path(Step.nominal), df, save_index="NAME")
+    # Write twiss to compare with old madx simlulations (if needed):
+    # tw: xt.TwissTable = line.twiss(continue_on_closed_orbit_error=False, strengths=True)
+    # df = twiss_to_omc3(tw)
+    # tfs.write(beam.get_twiss_path(Step.nominal), df, save_index="NAME")
 
     line.to_json(beam.get_line_path(Step.nominal))
 
 
-def create_turn_by_turn_data(beam: LHCBeam, line: xt.Line | None = None, n_turns: int = 10, action: float = 3e-9) -> tbt.TbtData:
+def install_errors(beam: LHCBeam, line: xt.Line | None = None):
+    """ Continue the LHC setup to the nominal machine, i.e.
+    match the tunes and write out the twiss table.
+
+    Args:
+        beam (LHCBeam): beam object storing machine configuration data
+        line (xt.Line): line of the loaded machine, if not given loads from json.
+    """
+    LOGGER.info("Creating nominal twiss table")
+
+    if line is None:
+        LOGGER.debug("Loading from file.")
+        line = xt.Line.from_json(beam.get_line_path(Step.nominal))
+
+    # Introduce some global coupling (modifies MQS) to increase 3Qy resonance
+    line.vv["cmrs.b1"] = 2e-4
+    line.vv["cmis.b1"] = 2e-4
+
+    ############# TODO: More Control? ################
+
+    # If you want to change values of a knob that is also already part of another knob,
+    # you need to ask someone with more xsuite experience, as the modification
+    # of values might override the expression, here: coupling knob
+
+    # knob_name = "kqs.r1b1"  # might not exist for beam2, check sequence file in acc-models-lhc/lhc.seq
+
+    # see expression with
+    # line.vars[knob_name]._expr()
+
+    # modify the value
+    # line.vv[knob_name] += 0.5e-4  # modification should show up in logging output!
+
+    # see expression with
+    # line.vars[knob_name]._expr()
+
+    # inspect the targets with:
+    # line.vars[knob_name]._find_dependant_targets()
+
+    ####################################
+
+    match(beam, line)
+
+    line.to_json(beam.get_line_path(Step.with_errors))
+
+
+def create_turn_by_turn_data(
+        beam: LHCBeam,
+        line: xt.Line | None = None,
+        n_turns: int = 10,
+        action: float = 3e-9,
+        output_name: str = "tracked"
+    ) -> tbt.TbtData:
     """ Perform the tracking of a particle with the given action 2J in m (in both planes).
 
     First ParticleMonitors are inserted into the line at the posision of the BPM-elements.
@@ -130,10 +183,11 @@ def create_turn_by_turn_data(beam: LHCBeam, line: xt.Line | None = None, n_turns
         line (xt.Line): line of the loaded machine, if not given loads from json (stage: nominal).
         n_turns (int): number of turns to track
         action (float): 2J in m
+        output_name (str): Identifyer of the output file
     """
     if line is None:
         LOGGER.debug("Loading from file.")
-        line = xt.Line.from_json(beam.get_line_path(Step.nominal))
+        line = xt.Line.from_json(beam.get_line_path(Step.with_errors))
 
     insert_monitors_at_pattern(line, n_turns=n_turns, pattern="BPM.*B[12]$")  # ignore BPMs ending in _something
 
@@ -146,7 +200,7 @@ def create_turn_by_turn_data(beam: LHCBeam, line: xt.Line | None = None, n_turns
     line.track(particles, num_turns=n_turns, with_progress=True)
 
     tbt_data = tbt.convert_to_tbt(line, datatype="xtrack")  # turn_by_turn version > 0.9.1 needed!
-    tbt.write(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name="tracked"), tbt_data, datatype="lhc")
+    tbt.write(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name=output_name), tbt_data, datatype="lhc")
 
     return tbt_data
 
@@ -190,6 +244,7 @@ def create_omc3_model_dir(beam: LHCBeam, line: xt.Line | None = None):
     new_link.symlink_to(old_link.readlink())
 
 
+# Nonlinear BPM behaviour ------------------------------------------------------
 
 def nonlinear_scaling(x: np.ndarray, alpha: float) -> np.ndarray:
     """ Function to apply to all coordinates. """
@@ -201,14 +256,21 @@ def modify_turn_by_turn_data(beam: LHCBeam, tbt_data: tbt.TbtData | None, alpha:
     if tbt_data is None:
         tbt_data = tbt.read(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name="tracked"), datatype="lhc")
 
-    # TODO: modify the tbt_data
+    # TODO: modify the tbt_data: apply nonlinear scaling
 
-    tbt.write(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name=f"tracked_modified{alpha:.2f}"), tbt_data, datatype="lhc")
+    tbt.write(
+        beam.model_dir / SDDS_NAME.format(beam=beam.beam, name=f"tracked_modified{alpha:.2f}"),
+        tbt_data,
+        datatype="lhc"
+    )
 
+
+# Run Main ---------------------------------------------------------------------
 
 def main():
     beam = LHCBeam(
         beam=1,
+        nat_tunes=(62.28, 60.31), # TODO: Ask Ewen about the tunes, mybe better go closer to 3Qy resonance
         year="2025",
         modifiers=["R2025aRP_A18cmC18cmA10mL200cm_Flat.madx"],
         model_dir=Path("./test_out"),
@@ -219,7 +281,9 @@ def main():
 
     # line = create_line(beam)
     # nominal(beam, line)
+    # create_turn_by_turn_data(beam, line.copy(), n_turns=6600, output_name="nominal")
     # create_omc3_model_dir(beam, line)
+    # install_errors(beam, line)
     # tbt_data = create_turn_by_turn_data(beam, line, n_turns=6600)
     # modify_turn_by_turn_data(beam, tbt_data, alpha=0.1)  # maybe even in a loop
 
@@ -230,7 +294,8 @@ def main():
 
     # nominal(beam)
     # create_omc3_model_dir(beam)
-    # create_turn_by_turn_data(beam, n_turns=6600)
+    install_errors(beam)
+    create_turn_by_turn_data(beam, n_turns=6600)
     # modify_turn_by_turn_data(beam, alpha=0.1)
 
 if __name__ == "__main__":
