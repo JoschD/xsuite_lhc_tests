@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
 
-def twiss_to_omc3(twiss: xt.TwissTable):
+def twiss_to_omc3(twiss: xt.TwissTable) -> tfs.TfsDataFrame:
     """ Convert a xsuite twiss table to an omc3-compatible tfs dataframe.
 
     Args:
@@ -35,8 +35,14 @@ def twiss_to_omc3(twiss: xt.TwissTable):
     df = df.rename(columns={"LENGTH": "L"})
     df.index = df.index.str.upper()
 
+    # add coupling (assumes 0, check `coupling_rmatrix.py` for something more exact)
+    df["R11"] = 0.
+    df["R12"] = 0.
+    df["R21"] = 0.
+    df["R22"] = 0.
+
     # filter
-    index_mask = df.index.str.match("M|BPM|IP")
+    index_mask = df.index.str.match("M|BPM|IP|T")
     columns_mask =  [col for col in LHCBeam.TWISS_COLUMNS if col in df.columns]
 
     return df.loc[index_mask, columns_mask]

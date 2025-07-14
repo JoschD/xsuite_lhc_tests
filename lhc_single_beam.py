@@ -7,6 +7,7 @@ from enum import StrEnum, auto
 import logging
 from pathlib import Path
 
+import numpy as np
 import tfs
 import xpart as xp
 import xtrack as xt
@@ -18,8 +19,11 @@ from utils.tfs import twiss_to_omc3
 from utils.xsuite import match, insert_monitors_at_pattern
 import turn_by_turn as tbt
 
+from omc3.model.constants import TWISS_DAT, TWISS_ELEMENTS_DAT
 
 MADX_LOGGING: bool = False
+SDDS_NAME: str = "Beam{beam}@BunchTurn@{name}.sdds"  # confirms to GUI loading filter
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,7 +32,6 @@ class Step(StrEnum):
     """ Enum for the different steps of the simulation """
     raw = auto()
     nominal = auto()
-
 
 
 def load_sequence_and_optics(beam: LHCBeam) -> Madx:
@@ -112,17 +115,95 @@ def nominal(beam: LHCBeam, line: xt.Line | None = None):
     line.to_json(beam.get_line_path(Step.nominal))
 
 
-def track(beam: LHCBeam, line: xt.Line | None = None, n_turns: int = 10) -> tbt.TbtData:
+def create_turn_by_turn_data(beam: LHCBeam, line: xt.Line | None = None, n_turns: int = 10, action: float = 3e-9) -> tbt.TbtData:
+    """ Perform the tracking of a particle with the given action 2J in m (in both planes).
+
+    First ParticleMonitors are inserted into the line at the posision of the BPM-elements.
+    We ignore BPMs ending in `_something` to exclude "_DOROS"-BPMS to avoid having two monitors
+    at exactly the same position, which causes some NaN-problems in the 3-BPM method.
+
+    Then a single particle at the given action is tracked and the data is converted
+    to a tbt.TbtData object and saved to an sdds file in "lhc" format.
+
+    Args:
+        beam (LHCBeam): beam object storing machine configuration data
+        line (xt.Line): line of the loaded machine, if not given loads from json (stage: nominal).
+        n_turns (int): number of turns to track
+        action (float): 2J in m
+    """
     if line is None:
         LOGGER.debug("Loading from file.")
         line = xt.Line.from_json(beam.get_line_path(Step.nominal))
 
-    insert_monitors_at_pattern(line, n_turns=n_turns)
-    line.track(line.particle_ref, num_turns=n_turns)
-    tbt_data = tbt.xtrack_line.convert_to_tbt(line)
+    insert_monitors_at_pattern(line, n_turns=n_turns, pattern="BPM.*B[12]$")  # ignore BPMs ending in _something
 
-    # tbt.write(beam.model_dir / "track.sdds", tbt_data, datatype="lhc")
+    # calculate initial position from action: z = sqrt(action_z * beta_z)
+    tw: xt.TwissTable = line.twiss(continue_on_closed_orbit_error=False, strengths=True)
+    x = np.sqrt(action * tw["betx"][0])
+    y = np.sqrt(action * tw["bety"][0])
+
+    particles = line.build_particles(particle_ref=line.particle_ref, num_particles=1, x=[x], y=[y], px=[0], py=[0])
+    line.track(particles, num_turns=n_turns, with_progress=True)
+
+    tbt_data = tbt.convert_to_tbt(line, datatype="xtrack")
+    tbt.write(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name="tracked"), tbt_data, datatype="lhc")
+
     return tbt_data
+
+
+def create_omc3_model_dir(beam: LHCBeam, line: xt.Line | None = None):
+    """ Create an omc3 model directory from the given line.
+
+    Will be created in a subfolder and can then be loaded from the GUI.
+
+    Needs to contain:
+        - twiss.dat
+        - twiss_elements.dat
+        - modifiers.madx (or a job.nominal.madx with `!@modifier` tags)
+
+    Optional:
+        - acc-models symlink
+    """
+    if line is None:
+        LOGGER.debug("Loading from file.")
+        line = xt.Line.from_json(beam.get_line_path(Step.nominal))
+
+    omc3_dir = beam.model_dir / f"omc3_{beam.model_dir.name}"
+    omc3_dir.mkdir(exist_ok=True, parents=True)
+
+    tw: xt.TwissTable = line.twiss(continue_on_closed_orbit_error=False, strengths=True)
+    df = twiss_to_omc3(tw)
+    df.headers["ENERGY"] = beam.energy
+    tfs.write(omc3_dir / TWISS_ELEMENTS_DAT, df, save_index="NAME")
+    tfs.write(omc3_dir / TWISS_DAT, df.loc[df.index.str.match("BPM"), :], save_index="NAME")
+
+    # omc3 will try to find modifiers, either in the job or as modifier.madx file:
+    with open(omc3_dir / "modifiers.madx", "w") as f:
+        for modifier in beam.modifiers:
+            f.write(f"call, file = \"{modifier}\";\n")
+
+    # create a copy of the acc-models symlink
+    old_link = beam.model_dir / beam.acc_models_link
+    new_link = omc3_dir / beam.acc_models_link
+    if new_link.is_symlink():
+        new_link.unlink()
+    new_link.symlink_to(old_link.readlink())
+
+
+
+def nonlinear_scaling(x: np.ndarray, alpha: float) -> np.ndarray:
+    """ Function to apply to all coordinates. """
+    return x + alpha * x**2
+
+
+def modify_turn_by_turn_data(beam: LHCBeam, tbt_data: tbt.TbtData | None, alpha: float = 0):
+    """ Modify the turn-by-turn data with the given alpha value. """
+    if tbt_data is None:
+        tbt_data = tbt.read(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name="tracked"), datatype="lhc")
+
+    # TODO: modify the tbt_data
+
+    tbt.write(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name=f"tracked_modified{alpha:.2f}"), tbt_data, datatype="lhc")
 
 
 def main():
@@ -133,14 +214,24 @@ def main():
         model_dir=Path("./test_out"),
     )
 
+    # From scratch: pass line/tbt object
+    # ##################################
+
     # line = create_line(beam)
     # nominal(beam, line)
-    # track(beam, line)
+    # create_omc3_model_dir(beam, line)
+    # tbt_data = create_turn_by_turn_data(beam, line, n_turns=6600)
+    # modify_turn_by_turn_data(beam, tbt_data, alpha=0.1)  # maybe even in a loop
+
+    # -------------------------------
+
+    # Re-do: load line/tbt object
+    # ###########################
 
     # nominal(beam)
-    tbt = track(beam)
-
-
+    # create_omc3_model_dir(beam)
+    # create_turn_by_turn_data(beam, n_turns=6600)
+    # modify_turn_by_turn_data(beam, alpha=0.1)
 
 if __name__ == "__main__":
     init_logging()

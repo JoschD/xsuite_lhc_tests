@@ -36,7 +36,7 @@ def match(beam: LHCBeam, line: xt.Line, step: float = 1e-8,  tolerance: float = 
         targets.append(xt.TargetSet(dqx=beam.chroma, dqy=beam.chroma, tol=tolerance))
 
     with disable_logging():
-        opt = line.match(vary=vary, targets=targets)
+        opt = line.match(vary=vary, targets=targets, solve=False)
         # opt.assert_within_tol=False
         opt.solve()
 
