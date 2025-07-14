@@ -145,7 +145,7 @@ def create_turn_by_turn_data(beam: LHCBeam, line: xt.Line | None = None, n_turns
     particles = line.build_particles(particle_ref=line.particle_ref, num_particles=1, x=[x], y=[y], px=[0], py=[0])
     line.track(particles, num_turns=n_turns, with_progress=True)
 
-    tbt_data = tbt.convert_to_tbt(line, datatype="xtrack")
+    tbt_data = tbt.convert_to_tbt(line, datatype="xtrack")  # turn_by_turn version > 0.9.1 needed!
     tbt.write(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name="tracked"), tbt_data, datatype="lhc")
 
     return tbt_data
@@ -225,8 +225,8 @@ def main():
 
     # -------------------------------
 
-    # Re-do: load line/tbt object
-    # ###########################
+    # Re-do: loads line/tbt object
+    # ############################
 
     # nominal(beam)
     # create_omc3_model_dir(beam)
