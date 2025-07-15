@@ -22,7 +22,7 @@ class LHC:
     Should be replaced with the accelerator class, if xsuite is implemented into omc3.
     """
     year: str
-    model_dir: Path
+    output_dir: Path
     modifiers: list[str | Path] = None
     nat_tunes: tuple[float, float] = (62.28, 60.31)
     energy: float | int = 6800
@@ -43,7 +43,7 @@ class LHC:
 
     def __post_init__(self):
         """ Setup the MADX, output dirs and logging as well as additional instance parameters. """
-        self.model_dir.mkdir(exist_ok=True, parents=True)
+        self.output_dir.mkdir(exist_ok=True, parents=True)
 
         self._create_symlink()
         self._find_modifiers()
@@ -58,7 +58,7 @@ class LHC:
     def _create_symlink(self):
         """ Creates a symbolic link to the acc-models-lhc directory. """
         acc_models_lhc = Path("/afs/cern.ch/eng/acc-models/lhc/")
-        full_link = self.model_dir / self.acc_models_link
+        full_link = self.output_dir / self.acc_models_link
         if full_link.is_symlink():
             full_link.unlink()
         full_link.symlink_to(acc_models_lhc / self.year)
@@ -84,7 +84,7 @@ class LHC:
                     self.acc_models_link / "operation" / "optics" / modifier
                 )
                 for modifier_path in sources:
-                    if (self.model_dir / modifier_path).is_file():
+                    if (self.output_dir / modifier_path).is_file():
                         new_modifiers.append(modifier_path)
                         break
                 else:
@@ -125,7 +125,7 @@ class LHCBeam(LHC):
             Path: Path to the output file
          """
         if dir_ is None:
-            dir_ = self.model_dir
+            dir_ = self.output_dir
         return dir_ / f'{type_}.lhc.b{self.beam:d}.{output_id}{suffix}'
 
     def get_twiss_path(self, output_id: str):

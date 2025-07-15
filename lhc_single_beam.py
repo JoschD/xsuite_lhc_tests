@@ -3,6 +3,7 @@ Setting up the nominal LHC in xsuite using cpymad.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from enum import StrEnum, auto
 import logging
 from pathlib import Path
@@ -20,6 +21,12 @@ from utils.xsuite import match, insert_monitors_at_pattern
 import turn_by_turn as tbt
 
 from omc3.model.constants import TWISS_DAT, TWISS_ELEMENTS_DAT
+from omc3.hole_in_one import hole_in_one_entrypoint as hio
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 
 MADX_LOGGING: bool = False
 SDDS_NAME: str = "Beam{beam}@BunchTurn@{name}.sdds"  # confirms to GUI loading filter
@@ -35,16 +42,39 @@ class Step(StrEnum):
     with_errors = auto()
 
 
+# Steps ------------------------------------------------------------------------
+
+# Load ----
+
+def create_line(beam: LHCBeam):
+    """ Create the line from the sequence and optics modifiers.
+    Saves it into a JSON file. """
+    LOGGER.info("Creating line")
+    madx = load_sequence_and_optics(beam)
+
+    with disable_logging():
+        line: xt.Line = xt.Line.from_madx_sequence(
+            madx.sequence[beam.sequence],
+            deferred_expressions=True
+        )
+
+    line.twiss_default["method"] = "4d"
+    line.particle_ref = xt.Particles(p0c=beam.energy*1e9, q0=1, mass0=xp.PROTON_MASS_EV)
+    line.to_json(beam.get_line_path(Step.raw))
+    madx.exit()
+    return line
+
+
 def load_sequence_and_optics(beam: LHCBeam) -> Madx:
     """ Load the sequence and optics modifiers into a MAD-X instance. """
     LOGGER.info("Loading sequence and optics modifiers")
 
     madx = Madx(
-            cwd=beam.model_dir,
+            cwd=beam.output_dir,
             **init_cpymad_logging(
                 console=MADX_LOGGING,
-                command_log=beam.model_dir / "madx_commands.madx",
-                output_log=beam.model_dir / "madx_output.log",
+                command_log=beam.output_dir / "madx_commands.madx",
+                output_log=beam.output_dir / "madx_output.log",
             )
     )
 
@@ -77,21 +107,7 @@ def load_sequence_and_optics(beam: LHCBeam) -> Madx:
     return madx
 
 
-def create_line(beam: LHCBeam):
-    """ Create the line from the sequence and optics modifiers.
-    Saves it into a JSON file. """
-    LOGGER.info("Creating line")
-    madx = load_sequence_and_optics(beam)
-
-    with disable_logging():
-        line: xt.Line = xt.Line.from_madx_sequence(madx.sequence[beam.sequence], deferred_expressions=True)
-
-    line.twiss_default["method"] = "4d"
-    line.particle_ref = xt.Particles(p0c=beam.energy*1e9, q0=1, mass0=xp.PROTON_MASS_EV)
-    line.to_json(beam.get_line_path(Step.raw))
-    madx.exit()
-    return line
-
+# Nominal ---
 
 def nominal(beam: LHCBeam, line: xt.Line | None = None):
     """ Continue the LHC setup to the nominal machine, i.e.
@@ -116,6 +132,8 @@ def nominal(beam: LHCBeam, line: xt.Line | None = None):
 
     line.to_json(beam.get_line_path(Step.nominal))
 
+
+# Add Errors ----
 
 def install_errors(beam: LHCBeam, line: xt.Line | None = None):
     """ Continue the LHC setup to the nominal machine, i.e.
@@ -162,6 +180,8 @@ def install_errors(beam: LHCBeam, line: xt.Line | None = None):
     line.to_json(beam.get_line_path(Step.with_errors))
 
 
+# Tracking ----
+
 def create_turn_by_turn_data(
         beam: LHCBeam,
         line: xt.Line | None = None,
@@ -200,10 +220,12 @@ def create_turn_by_turn_data(
     line.track(particles, num_turns=n_turns, with_progress=True)
 
     tbt_data = tbt.convert_to_tbt(line, datatype="xtrack")  # turn_by_turn version > 0.9.1 needed!
-    tbt.write(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name=output_name), tbt_data, datatype="lhc")
+    tbt.write(beam.output_dir / SDDS_NAME.format(beam=beam.beam, name=output_name), tbt_data, datatype="lhc")
 
     return tbt_data
 
+
+# OMC3 functions ---------------------------------------------------------------
 
 def create_omc3_model_dir(beam: LHCBeam, line: xt.Line | None = None):
     """ Create an omc3 model directory from the given line.
@@ -222,7 +244,7 @@ def create_omc3_model_dir(beam: LHCBeam, line: xt.Line | None = None):
         LOGGER.debug("Loading from file.")
         line = xt.Line.from_json(beam.get_line_path(Step.nominal))
 
-    omc3_dir = beam.model_dir / f"omc3_{beam.model_dir.name}"
+    omc3_dir = beam.output_dir / f"omc3_{beam.output_dir.name}"
     omc3_dir.mkdir(exist_ok=True, parents=True)
 
     tw: xt.TwissTable = line.twiss(continue_on_closed_orbit_error=False, strengths=True)
@@ -237,11 +259,46 @@ def create_omc3_model_dir(beam: LHCBeam, line: xt.Line | None = None):
             f.write(f"call, file = \"{modifier}\";\n")
 
     # create a copy of the acc-models symlink
-    old_link = beam.model_dir / beam.acc_models_link
+    old_link = beam.output_dir / beam.acc_models_link
     new_link = omc3_dir / beam.acc_models_link
     if new_link.is_symlink():
         new_link.unlink()
     new_link.symlink_to(old_link.readlink())
+
+
+def run_omc3_from_python(beam: LHCBeam, files: Sequence[Path]):
+    """ Run omc3 from python.
+
+
+    Check: https://pylhc.github.io/omc3/entrypoints/analysis.html#hole-in-one
+    """
+    # Run per file, otherwise it would create a common optics analysis
+    # over all files
+    for file_path in files:
+        hio(
+            # general parameters
+            files=[file_path],
+            outputdir=beam.output_dir / file_path.stem,
+            tbt_datatype="lhc",
+            unit="m",
+            # accel parameters
+            accel=beam.ACCEL,
+            model_dir=beam.output_dir / f"omc3_{beam.output_dir.name}",
+            beam=beam.beam,
+            year=beam.year,
+            # harpy parameters
+            harpy=True,
+            tunes=list(beam.nat_tunes) + [0.],
+            opposite_direction=(beam.bv < 0),
+            to_write=['lin', 'full_spectra', 'bpm_summary'],
+            # cleaning parameters
+            clean=False,
+            # optics parameters
+            optics=True,
+            compensation="none",
+            three_bpm_method=True,  #
+            nonlinear=["rdt"],
+        )
 
 
 # Nonlinear BPM behaviour ------------------------------------------------------
@@ -254,12 +311,12 @@ def nonlinear_scaling(x: np.ndarray, alpha: float) -> np.ndarray:
 def modify_turn_by_turn_data(beam: LHCBeam, tbt_data: tbt.TbtData | None, alpha: float = 0):
     """ Modify the turn-by-turn data with the given alpha value. """
     if tbt_data is None:
-        tbt_data = tbt.read(beam.model_dir / SDDS_NAME.format(beam=beam.beam, name="tracked"), datatype="lhc")
+        tbt_data = tbt.read(beam.output_dir / SDDS_NAME.format(beam=beam.beam, name="tracked"), datatype="lhc")
 
     # TODO: modify the tbt_data: apply nonlinear scaling
 
     tbt.write(
-        beam.model_dir / SDDS_NAME.format(beam=beam.beam, name=f"tracked_modified{alpha:.2f}"),
+        beam.output_dir / SDDS_NAME.format(beam=beam.beam, name=f"tracked_modified{alpha:.2f}"),
         tbt_data,
         datatype="lhc"
     )
@@ -273,7 +330,7 @@ def main():
         nat_tunes=(62.28, 60.31), # TODO: Ask Ewen about the tunes, mybe better go closer to 3Qy resonance
         year="2025",
         modifiers=["R2025aRP_A18cmC18cmA10mL200cm_Flat.madx"],
-        model_dir=Path("./test_out"),
+        output_dir=Path("./test_out"),
     )
 
     # From scratch: pass line/tbt object
@@ -294,9 +351,15 @@ def main():
 
     # nominal(beam)
     # create_omc3_model_dir(beam)
-    install_errors(beam)
-    create_turn_by_turn_data(beam, n_turns=6600)
+    # install_errors(beam)
+    # create_turn_by_turn_data(beam, n_turns=6600)
     # modify_turn_by_turn_data(beam, alpha=0.1)
+
+    # -------------------------------
+
+    # Run OMC3
+    # ########
+    # run_omc3_from_python(beam, [beam.output_dir / SDDS_NAME.format(beam=beam.beam, name="tracked")])
 
 if __name__ == "__main__":
     init_logging()
